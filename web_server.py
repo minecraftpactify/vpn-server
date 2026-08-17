@@ -1,102 +1,92 @@
 """
-🌍 Serveur VPN déployable sur Render.com
-API REST qui gère les connexions VPN
+🌍 Serveur VPN - WireGuard + API de contrôle
 """
 
 from flask import Flask, jsonify, request
 import os
 import json
+import subprocess
 from datetime import datetime
 import logging
 
 app = Flask(__name__)
 
-# Configuration des logs
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Stockage en mémoire (pour la démo)
+# Stockage
 clients_connectes = {}
-historique_connexions = []
 statistiques = {
     "total_connexions": 0,
     "octets_transferes": 0,
-    "demarre_le": datetime.now().isoformat()
+    "demarre_le": datetime.now().isoformat(),
+    "wireguard_actif": False
 }
+
+WG_CONFIG = """[Interface]
+PrivateKey = SERVER_PRIVATE_KEY
+Address = 10.0.0.1/24
+PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+ListenPort = 51820
+
+[Peer]
+PublicKey = CLIENT_PUBLIC_KEY
+AllowedIPs = 10.0.0.2/32
+"""
 
 
 @app.route('/')
 def accueil():
-    """Page d'accueil de l'API"""
     return jsonify({
-        "service": "VPN Shield Server",
-        "version": "1.0",
+        "service": "VPN Shield - WireGuard",
+        "version": "2.0",
         "statut": "en ligne",
-        "serveur": "Render.com",
+        "serveur": "Render.com - Frankfurt",
+        "wireguard": statistiques["wireguard_actif"],
         "heure_serveur": datetime.now().isoformat(),
+        "ip_publique": request.host,
         "clients_connectes": len(clients_connectes)
     })
 
 
 @app.route('/api/handshake', methods=['POST'])
 def handshake():
-    """Endpoint pour le handshake VPN"""
-    data = request.get_json()
+    data = request.get_json() or {}
     client_id = data.get('client_id', 'inconnu')
     pays = data.get('pays', 'inconnu')
+    client_public_key = data.get('public_key', None)
     
     clients_connectes[client_id] = {
         "pays": pays,
+        "public_key": client_public_key,
         "connecte_le": datetime.now().isoformat(),
-        "ip": request.remote_addr
+        "ip_source": request.remote_addr
     }
     
     statistiques["total_connexions"] += 1
-    
-    logger.info(f"🤝 Handshake de {client_id} depuis {pays}")
     
     return jsonify({
         "status": "success",
         "message": "Handshake réussi",
         "server_time": datetime.now().isoformat(),
-        "assigned_ip": f"10.0.0.{len(clients_connectes) + 1}",
-        "dns": "1.1.1.1, 8.8.8.8"
+        "assigned_ip": "10.0.0.2",
+        "dns": "1.1.1.1, 8.8.8.8",
+        "info": "Pour le tunneling complet, configure WireGuard sur ton PC"
     })
 
 
-@app.route('/api/data', methods=['POST'])
-def recevoir_data():
-    """Reçoit des données du client (chiffrées)"""
-    data = request.get_json()
-    client_id = data.get('client_id', 'inconnu')
-    size = data.get('size', 0)
-    encrypted = data.get('encrypted_payload', '')
-    
-    statistiques["octets_transferes"] += size
-    
-    logger.info(f"📦 Données de {client_id}: {size} octets")
-    
+@app.route('/api/config', methods=['GET'])
+def get_config():
+    """Retourne la config WireGuard client"""
     return jsonify({
-        "status": "received",
-        "echo_size": size
+        "config": WG_CONFIG,
+        "note": "Remplace SERVER_PRIVATE_KEY par la vraie clé du serveur"
     })
-
-
-@app.route('/api/disconnect', methods=['POST'])
-def deconnecter():
-    """Déconnecte un client"""
-    data = request.get_json()
-    client_id = data.get('client_id', 'inconnu')
-    
-    if client_id in clients_connectes:
-        del clients_connectes[client_id]
-    
-    return jsonify({"status": "disconnected"})
 
 
 @app.route('/api/stats')
 def stats():
-    """Statistiques du serveur"""
     return jsonify({
         "statistiques": statistiques,
         "clients_actifs": clients_connectes,
@@ -104,9 +94,26 @@ def stats():
     })
 
 
+@app.route('/api/data', methods=['POST'])
+def recevoir_data():
+    data = request.get_json() or {}
+    client_id = data.get('client_id', 'inconnu')
+    size = data.get('size', 0)
+    statistiques["octets_transferes"] += size
+    return jsonify({"status": "received", "echo_size": size})
+
+
+@app.route('/api/disconnect', methods=['POST'])
+def deconnecter():
+    data = request.get_json() or {}
+    client_id = data.get('client_id', 'inconnu')
+    if client_id in clients_connectes:
+        del clients_connectes[client_id]
+    return jsonify({"status": "disconnected"})
+
+
 @app.route('/health')
 def health():
-    """Health check pour Render"""
     return "OK", 200
 
 
